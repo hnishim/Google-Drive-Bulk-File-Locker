@@ -65,7 +65,7 @@
     * 例: `https://drive.google.com/drive/folders/xxxxxxxxxxxxxxxxxxx`
 2.  ターミナル（コマンドプロンプト）でスクリプトを実行します。
     ```bash
-    python lock_drive_files.py
+    python googleDrivePathGenerator.py.py
     ```
 3.  **初回実行時のみ:**
     * ブラウザが自動的に起動し、Googleアカウントへのアクセス許可を求める画面が表示されます。

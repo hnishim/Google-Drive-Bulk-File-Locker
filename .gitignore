@@ -1,0 +1,13 @@
+# Credentials / Tokens
+credentials.json
+token.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment (Optional, if using virtual environments)
+# .env
+# venv/
+# ENV/

@@ -20,7 +20,7 @@ NON_LOCKABLE_MIME_TYPES = [
     'application/vnd.google-apps.site',
     'application/vnd.google-apps.script',
     'application/vnd.google-apps.shortcut', # ショートカット自体はロックできない
-    'application/vnd.google-apps.folder',   # フォルダは対象外
+    'application/vnd.google-apps.folder',   # フォルダは対象外 (今回はフォルダ自体をロック対象外とするが、判定には使用)
 ]
 # ロック理由
 LOCK_REASON = 'Locked by automated script'
@@ -78,18 +78,61 @@ def authenticate():
         print(f"予期せぬエラーが発生しました: {e}")
         return None
 
-def get_folder_id_from_url(url):
-    """Google DriveのフォルダURLからフォルダIDを抽出する"""
-    # /folders/ または /drive/folders/ の後の英数字とハイフン、アンダースコアにマッチ
-    match = re.search(r'/folders/([a-zA-Z0-9_-]+)', url)
-    if match:
-        return match.group(1)
-    else:
-        # drive/u/0/folders/ のような形式も考慮
-        match = re.search(r'drive/u/\d+/folders/([a-zA-Z0-9_-]+)', url)
-        if match:
-            return match.group(1)
+def get_id_from_url(url):
+    """Google DriveのURLからファイル/フォルダIDを抽出する"""
+    # 新しい形式: https://drive.google.com/open?id=<ID>&usp=drive_fs
+    match_open = re.search(r'[?&]id=([a-zA-Z0-9_-]+)', url)
+    if match_open:
+        return match_open.group(1)
+
+    # 従来のフォルダ形式: /folders/ または /drive/folders/ の後の英数字とハイフン、アンダースコアにマッチ
+    match_folder = re.search(r'/folders/([a-zA-Z0-9_-]+)', url)
+    if match_folder:
+        return match_folder.group(1)
+
+    # 従来のファイル形式: /file/d/<ID>/view
+    match_file = re.search(r'/file/d/([a-zA-Z0-9_-]+)/view', url)
+    if match_file:
+        return match_file.group(1)
+
+    # drive/u/0/folders/ のような形式も考慮
+    match_u_folder = re.search(r'drive/u/\d+/folders/([a-zA-Z0-9_-]+)', url)
+    if match_u_folder:
+        return match_u_folder.group(1)
+
+    # drive/u/0/file/d/<ID>/view のような形式も考慮
+    match_u_file = re.search(r'drive/u/\d+/file/d/([a-zA-Z0-9_-]+)/view', url)
+    if match_u_file:
+        return match_u_file.group(1)
+
     return None
+
+def get_mime_type(service, file_id):
+    """指定されたIDのMIMEタイプを取得する"""
+    try:
+        file = service.files().get(fileId=file_id, fields='mimeType', supportsAllDrives=True).execute()
+        return file.get('mimeType')
+    except HttpError as error:
+        print(f"ID '{file_id}' のMIMEタイプ取得中にエラーが発生しました: {error}")
+        return None
+    except Exception as e:
+        print(f"ID '{file_id}' のMIMEタイプ取得中に予期せぬエラーが発生しました: {e}")
+        return None
+
+def get_file_metadata(service, file_id):
+    """指定されたIDのファイルメタデータを取得する"""
+    try:
+        # 取得フィールドに contentRestrictions を追加
+        fields = 'id, name, mimeType, capabilities, contentRestrictions'
+        file = service.files().get(fileId=file_id, fields=fields, supportsAllDrives=True).execute()
+        return file
+    except HttpError as error:
+        print(f"ID '{file_id}' のメタデータ取得中にエラーが発生しました: {error}")
+        return None
+    except Exception as e:
+        print(f"ID '{file_id}' のメタデータ取得中に予期せぬエラーが発生しました: {e}")
+        return None
+
 
 def list_files_recursive(service, folder_id):
     """指定されたフォルダID配下の全ファイル(サブフォルダ含む)を再帰的に取得"""
@@ -99,22 +142,26 @@ def list_files_recursive(service, folder_id):
     query_fields = 'nextPageToken, files(id, name, mimeType, capabilities, contentRestrictions)'
     query = f"'{folder_id}' in parents and trashed = false"
 
+    print(f"フォルダID '{folder_id}' の内容を取得中...")
+
     while True:
         try:
             response = service.files().list(
                 q=query,
                 spaces='drive',
                 fields=query_fields,
-                pageToken=page_token
+                pageToken=page_token,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
             ).execute()
 
             files = response.get('files', [])
-            print(f"フォルダID '{folder_id}' 内で {len(files)} 個のアイテムを発見。")
+            print(f"  フォルダ内で {len(files)} 個のアイテムを発見。")
 
             for file in files:
                 if file.get('mimeType') == 'application/vnd.google-apps.folder':
                     # サブフォルダの場合、再帰的に探索
-                    print(f"  サブフォルダ '{file.get('name')}' を探索中...")
+                    print(f"  サブフォルダ '{file.get('name')}' (ID: {file.get('id')}) を探索中...")
                     all_files.extend(list_files_recursive(service, file.get('id')))
                 else:
                     # ファイルの場合、リストに追加
@@ -137,7 +184,8 @@ def lock_file(service, file_id, file_name):
         updated_file = service.files().update(
             fileId=file_id,
             body={'contentRestrictions': [{'readOnly': True, 'reason': LOCK_REASON}]},
-            fields='id, name, contentRestrictions' # 更新結果確認用
+            fields='id, name, contentRestrictions', # 更新結果確認用
+            supportsAllDrives=True
         ).execute()
         # 制限が実際に適用されたか確認（より確実に）
         restrictions = updated_file.get('contentRestrictions', [])
@@ -173,47 +221,75 @@ if __name__ == '__main__':
 
     # 2. クリップボードからURLを取得
     try:
-        folder_url = pyperclip.paste()
-        if not folder_url:
+        drive_url = pyperclip.paste()
+        if not drive_url:
             print("エラー: クリップボードが空です。")
             exit()
-        print(f"クリップボードからURLを取得しました: {folder_url}")
+        print(f"クリップボードからURLを取得しました: {drive_url}")
     except Exception as e:
         print(f"クリップボードからの読み取りに失敗しました: {e}")
         print("pyperclipが正しくインストールされ、動作しているか確認してください。")
         exit()
 
-
-    # 3. URLからフォルダIDを抽出
-    folder_id = get_folder_id_from_url(folder_url)
-    if not folder_id:
-        print("エラー: クリップボードの内容から有効なGoogle DriveフォルダIDが見つかりませんでした。")
-        print("URLの形式例: https://drive.google.com/drive/folders/xxxxxxxxxxxxxxxxxxx")
+    # 3. URLからIDを抽出
+    item_id = get_id_from_url(drive_url)
+    if not item_id:
+        print("エラー: クリップボードの内容から有効なGoogle Driveのファイル/フォルダIDが見つかりませんでした。")
+        print("対応しているURL形式例:")
+        print("  - https://drive.google.com/open?id=xxxxxxxxxxxxxxxxxxx&usp=drive_fs")
+        print("  - https://drive.google.com/drive/folders/xxxxxxxxxxxxxxxxxxx")
+        print("  - https://drive.google.com/file/d/xxxxxxxxxxxxxxxxxxx/view")
         exit()
-    print(f"フォルダIDを抽出しました: {folder_id}")
+    print(f"IDを抽出しました: {item_id}")
 
-    # 4. 指定フォルダ配下の全ファイルを取得
-    print("\nフォルダ内のファイルリストを取得しています（サブフォルダ含む）...")
-    all_files_to_process = list_files_recursive(service, folder_id)
-    print(f"\n合計 {len(all_files_to_process)} 個のファイルを検出しました。")
+    # 4. IDのMIMEタイプを取得してファイルかフォルダか判定
+    print(f"ID '{item_id}' のMIMEタイプを取得中...")
+    item_mime_type = get_mime_type(service, item_id)
 
-    # 5. 各ファイルをロック
-    print("\nファイルのロック処理を開始します...")
+    all_files_to_process = []
+
+    if item_mime_type is None:
+        print(f"エラー: ID '{item_id}' のMIMEタイプを取得できませんでした。処理を中断します。")
+        exit()
+    elif item_mime_type == 'application/vnd.google-apps.folder':
+        print(f"ID '{item_id}' はフォルダです。フォルダ内のファイルを再帰的に取得します。")
+        # フォルダの場合、再帰的にファイルリストを取得
+        all_files_to_process = list_files_recursive(service, item_id)
+    else:
+        print(f"ID '{item_id}' はファイル (MIMEタイプ: {item_mime_type}) です。このファイルを処理します。")
+        # ファイルの場合、そのファイルのメタデータを取得してリストに追加
+        file_metadata = get_file_metadata(service, item_id)
+        if file_metadata:
+            all_files_to_process.append(file_metadata)
+        else:
+            print(f"エラー: ファイルID '{item_id}' のメタデータを取得できませんでした。処理を中断します。")
+            exit()
+
+    print(f"\n合計 {len(all_files_to_process)} 個のアイテムをロック対象として検出しました。")
+
+    # 5. 各アイテムをロック
+    print("\nアイテムのロック処理を開始します...")
     locked_count = 0
     skipped_count = 0
     failed_count = 0
 
     if not all_files_to_process:
-        print("ロック対象のファイルが見つかりませんでした。")
+        print("ロック対象のアイテムが見つかりませんでした。")
     else:
-        for file in all_files_to_process:
-            file_id = file.get('id')
-            file_name = file.get('name')
-            mime_type = file.get('mimeType')
-            capabilities = file.get('capabilities', {})
-            content_restrictions = file.get('contentRestrictions', []) # 既存の制限を取得
+        for item in all_files_to_process:
+            item_id = item.get('id')
+            item_name = item.get('name')
+            mime_type = item.get('mimeType')
+            capabilities = item.get('capabilities', {})
+            content_restrictions = item.get('contentRestrictions', []) # 既存の制限を取得
 
-            print(f"- ファイル '{file_name}' (MIME: {mime_type}) を処理中...")
+            # フォルダ自体はロック対象外とする
+            if mime_type == 'application/vnd.google-apps.folder':
+                 print(f"- スキップ: フォルダ '{item_name}' (ID: {item_id}) はロック対象外です。")
+                 skipped_count += 1
+                 continue
+
+            print(f"- アイテム '{item_name}' (MIME: {mime_type}, ID: {item_id}) を処理中...")
 
             # --- 既にロックされているかチェック ---
             is_already_locked = False
@@ -223,7 +299,7 @@ if __name__ == '__main__':
                     break # readOnlyが見つかればチェック終了
 
             if is_already_locked:
-                print(f"  スキップ: ファイル '{file_name}' は既にロックされています。")
+                print(f"  スキップ: アイテム '{item_name}' は既にロックされています。")
                 skipped_count += 1
                 continue
             # --- チェック完了 ---
@@ -240,20 +316,20 @@ if __name__ == '__main__':
             can_modify_restriction = capabilities.get('canModifyEditorContentRestriction', False)
 
             if not can_edit:
-                print(f"  スキップ: ファイル '{file_name}' への編集権限がありません。")
+                print(f"  スキップ: アイテム '{item_name}' への編集権限がありません。")
                 skipped_count += 1
                 continue
 
             # API Capabilitiesでロック不可と示されている場合
             # (編集権限があっても、このcapabilityがFalseの場合がある)
             if not can_modify_restriction:
-                print(f"  スキップ: APIによるとファイル '{file_name}' のコンテンツ制限を変更できません。")
+                print(f"  スキップ: APIによるとアイテム '{item_name}' のコンテンツ制限を変更できません。")
                 skipped_count += 1
                 continue
             # --- チェック完了 ---
 
             # ロック処理を実行
-            if lock_file(service, file_id, file_name):
+            if lock_file(service, item_id, item_name):
                 locked_count += 1
             else:
                 failed_count += 1
@@ -261,6 +337,6 @@ if __name__ == '__main__':
     # 6. 結果表示
     print("\n--- 処理結果 ---")
     print(f"ロック成功: {locked_count} 件")
-    print(f"スキップ  : {skipped_count} 件 (既にロック済み、ロック非対応タイプ、権限不足など)")
+    print(f"スキップ  : {skipped_count} 件 (既にロック済み、ロック非対応タイプ、権限不足、フォルダなど)")
     print(f"ロック失敗: {failed_count} 件 (APIエラーなど)")
     print("---------------")

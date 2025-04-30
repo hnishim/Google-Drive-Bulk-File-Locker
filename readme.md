@@ -50,7 +50,7 @@
     ```
 2.  Python 仮想環境を構築し有効化します。
     ```bash
-    python3 -m venv <newenvname>
+    python3 -m venv [newenvname]
     source [newenvname]/bin/activate
     ```
 3.  必要なライブラリをインストールします。
